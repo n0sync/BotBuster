@@ -5,6 +5,22 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from script import run_recommender  
+from flask import Flask
+from threading import Thread
+import logging
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "alive!"
+
+def run():
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
+    app.run(host='0.0.0.0', port=8080)
+
+Thread(target=run).start()
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
