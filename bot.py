@@ -30,6 +30,36 @@ WATCHLIST_FILE = "watchlist.txt"
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+class MovieListModal(discord.ui.Modal, title="Add Movies to Watchlist"):
+    movies_input = discord.ui.TextInput(
+        label="Movie Titles",
+        style=discord.TextStyle.paragraph,
+        placeholder="Enter movie titles (one per line or comma-separated)...",
+        required=True,
+        max_length=2000
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        raw_titles = re.split(r"\d+\.\s*|,|\n", self.movies_input.value)
+        titles = []
+        for t in raw_titles:
+            cleaned = re.sub(r"\[.*?\]", "", t)
+            cleaned = cleaned.strip(" :.-")
+            if cleaned:
+                titles.append(cleaned)
+        
+        if not titles:
+            await interaction.followup.send("No valid movie titles found in your input.")
+            return
+            
+        results = await run_recommender(titles, top_n=5)
+        combined = "\n\n".join(results)
+        await interaction.followup.send(
+            f"Added {len(titles)} movies to your watchlist.\n\nHere are some recommendations:\n\n{combined}"
+        )
+
 @bot.event
 async def on_ready():
     try:
@@ -58,23 +88,9 @@ async def recommend_more(interaction: discord.Interaction, movie_title: str):
     await interaction.followup.send(combined)
 
 @bot.tree.command(name="add_list", description="Paste multiple movie titles at once")
-async def add_list(interaction: discord.Interaction, movies: str):
-    await interaction.response.defer()
-    raw_titles = re.split(r"\d+\.\s*|,|\n", movies)
-    titles = []
-    for t in raw_titles:
-        cleaned = re.sub(r"\[.*?\]", "", t)
-        cleaned = cleaned.strip(" :.-")
-        if cleaned:
-            titles.append(cleaned)
-    if not titles:
-        await interaction.followup.send("No valid movie titles found in your input.")
-        return
-    results = await run_recommender(titles, top_n=5)
-    combined = "\n\n".join(results)
-    await interaction.followup.send(
-        f"Added {len(titles)} movies to your watchlist.\n\nHere are some recommendations:\n\n{combined}"
-    )
+async def add_list(interaction: discord.Interaction):
+    modal = MovieListModal()
+    await interaction.response.send_modal(modal)
 
 @bot.tree.command(name="watchlist", description="Show your current watchlist")
 async def watchlist(interaction: discord.Interaction):
@@ -99,7 +115,7 @@ async def clear_watchlist(interaction: discord.Interaction):
 @bot.tree.command(name="clear_messages", description="Clear a number of recent messages in this channel")
 async def clear_messages(interaction: discord.Interaction, amount: int):
     if not interaction.user.guild_permissions.manage_messages:
-        await interaction.response.send_message("You don’t have permission to manage messages.", ephemeral=True)
+        await interaction.response.send_message("You don't have permission to manage messages.", ephemeral=True)
         return
     await interaction.response.defer()
     deleted = await interaction.channel.purge(limit=amount)
