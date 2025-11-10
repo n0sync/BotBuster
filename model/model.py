@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import List
+from scipy.sparse import hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics.pairwise import cosine_similarity
@@ -11,13 +12,13 @@ class MovieRecommender:
         self.user_path = user_path
         self.catalog = None
         self.user = None
-        self.vectorizer = None
+        self.vectorizers = {}
         self.catalog_matrix = None
         self.user_matrix = None
         self.user_profile = None
         self.scaler = MinMaxScaler()
         self.text_cols = ["genres", "keywords", "cast", "director", "overview"]
-        self.num_cols = ["vote_average", "popularity"]
+        self.num_cols = ["vote_average", "popularity", "vote_count"]
         self.id_col = "id"
         self.title_col = "title"
 
@@ -46,32 +47,36 @@ class MovieRecommender:
             self.catalog[self.title_col] = ""
         if self.title_col not in self.user.columns:
             self.user[self.title_col] = ""
-
-    def _combine_text(self, df: pd.DataFrame) -> pd.Series:
-        return (
-            df["genres"] + " " +
-            df["keywords"] + " " +
-            df["cast"] + " " +
-            df["director"] + " " +
-            df["overview"]
-        )
+        self.catalog = self.catalog[
+            (self.catalog["vote_average"] >= 6.5) &
+            (self.catalog["vote_count"] >= 500) &
+            (self.catalog["popularity"] >= self.catalog["popularity"].quantile(0.2)) &
+            (self.catalog["overview"].str.len() > 50)
+        ]
 
     def fit(self, max_features: int = 20000):
         self.load()
-        catalog_text = self._combine_text(self.catalog)
-        user_text = self._combine_text(self.user)
-        all_text = pd.concat([catalog_text, user_text], ignore_index=True)
-        self.vectorizer = TfidfVectorizer(stop_words="english", max_features=max_features)
-        self.vectorizer.fit(all_text)
-        self.catalog_matrix = self.vectorizer.transform(catalog_text)
-        self.user_matrix = self.vectorizer.transform(user_text)
+        weights = {"genres":0.3,"keywords":0.2,"overview":0.3,"cast":0.1,"director":0.1}
+        catalog_matrices = []
+        user_matrices = []
+        for col, w in weights.items():
+            vec = TfidfVectorizer(stop_words="english", max_features=max_features)
+            all_text = pd.concat([self.catalog[col], self.user[col]], ignore_index=True)
+            vec.fit(all_text)
+            self.vectorizers[col] = vec
+            catalog_matrices.append(vec.transform(self.catalog[col]) * w)
+            user_matrices.append(vec.transform(self.user[col]) * w)
+        self.catalog_matrix = hstack(catalog_matrices)
+        self.user_matrix = hstack(user_matrices)
         self.user_profile = np.asarray(self.user_matrix.mean(axis=0)).ravel()
-        self.catalog["num_features"] = self.scaler.fit_transform(self.catalog[self.num_cols].values).mean(axis=1)
+        self.catalog["num_features"] = self.scaler.fit_transform(
+            self.catalog[["vote_average","popularity"]].values
+        ).mean(axis=1)
 
     def recommend(self, top_n: int = 20, exclude_liked: bool = True, diversity: float = 0.0) -> pd.DataFrame:
         sims = cosine_similarity(self.user_profile.reshape(1, -1), self.catalog_matrix).flatten()
         self.catalog["content_score"] = sims
-        self.catalog["hybrid_score"] = 0.7 * self.catalog["content_score"] + 0.3 * self.catalog["num_features"]
+        self.catalog["hybrid_score"] = 0.9 * self.catalog["content_score"] + 0.1 * self.catalog["num_features"]
         if exclude_liked:
             liked_ids = set(self.user[self.id_col].tolist())
             liked_titles = set(self.user[self.title_col].tolist())
@@ -98,59 +103,30 @@ class MovieRecommender:
                 "content_score", "hybrid_score"]
         return result[cols]
 
-
-
-    def recommend_by_seed(self, seed_titles: List[str], top_n: int = 20, exclude_liked: bool = True) -> pd.DataFrame:
-        if not seed_titles:
-            return self.recommend(top_n=top_n, exclude_liked=exclude_liked)
-        seeds = self.catalog[self.catalog[self.title_col].isin(seed_titles)]
-        if seeds.empty:
-            return self.recommend(top_n=top_n, exclude_liked=exclude_liked)
-        seed_text = self._combine_text(seeds)
-        seed_matrix = self.vectorizer.transform(seed_text)
-        seed_profile = seed_matrix.mean(axis=0)
-        sims = cosine_similarity(seed_profile, self.catalog_matrix).flatten()
-        self.catalog["content_score_seed"] = sims
-        self.catalog["hybrid_score_seed"] = 0.7 * self.catalog["content_score_seed"] + 0.3 * self.catalog["num_features"]
-        if exclude_liked:
-            liked_ids = set(self.user[self.id_col].tolist())
-            liked_titles = set(self.user[self.title_col].tolist())
-            mask = (~self.catalog[self.id_col].isin(liked_ids)) & (~self.catalog[self.title_col].isin(liked_titles))
-            ranked = self.catalog[mask].copy()
-        else:
-            ranked = self.catalog.copy()
-        ranked = ranked.sort_values("hybrid_score_seed", ascending=False)
-        cols = [self.id_col, self.title_col, "genres", "keywords", "director", "vote_average", "popularity", "content_score_seed", "hybrid_score_seed"]
-        return ranked.head(top_n)[cols]
-
     def explain_recommendation(self, movie_row, user_movies):
         reasons = []
         user_genres = set(" ".join(user_movies["genres"].astype(str)).split())
         user_keywords = set(" ".join(user_movies["keywords"].astype(str)).split())
         user_cast = set(" ".join(user_movies["cast"].astype(str)).split())
         user_directors = set(user_movies["director"].astype(str))
-
         movie_genres = set(str(movie_row["genres"]).split())
         movie_keywords = set(str(movie_row["keywords"]).split())
         movie_cast = set(str(movie_row["cast"]).split())
         movie_director = str(movie_row["director"])
-
         if movie_genres & user_genres:
-            reasons.append(f"shares genres like {', '.join(movie_genres & user_genres)}")
+            reasons.append(f"shares genres: {', '.join(sorted(movie_genres & user_genres))}")
         if movie_keywords & user_keywords:
-            reasons.append(f"explores themes such as {', '.join(list(movie_keywords & user_keywords)[:3])}")
+            reasons.append(f"explores themes: {', '.join(sorted(list(movie_keywords & user_keywords)[:2]))}")
         if movie_cast & user_cast:
-            reasons.append(f"features actors you liked ({', '.join(list(movie_cast & user_cast)[:2])})")
+            reasons.append(f"features actors you liked: {', '.join(sorted(list(movie_cast & user_cast)[:2]))}")
         if movie_director in user_directors:
             reasons.append(f"directed by {movie_director}, also in your favorites")
-
         if not reasons:
-            reasons.append("matches the tone and storytelling style of your favorites")
-
-        return " and ".join(reasons)
+            reasons.append("shares narrative style with your watchlist")
+        return " | ".join(reasons)
 
     def explain(self, k: int = 20) -> pd.DataFrame:
-        vocab = np.array(self.vectorizer.get_feature_names_out())
+        vocab = np.array(self.vectorizers["overview"].get_feature_names_out())
         user_vec = np.asarray(self.user_profile).flatten()
         top_idx = user_vec.argsort()[::-1][:k]
         tokens = vocab[top_idx]
