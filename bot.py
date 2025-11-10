@@ -113,14 +113,13 @@ async def clear_watchlist(interaction: discord.Interaction):
         os.remove("watchlist.csv")
     await interaction.response.send_message("Your watchlist has been cleared.")
 
-@bot.tree.command(name="clear_messages", description="Clear a number of recent messages in this channel")
-async def clear_messages(interaction: discord.Interaction, amount: int):
+@bot.tree.command(name="clear_messages", description="Clear all messages in this channel")
+async def clear_messages(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.manage_messages:
         await interaction.response.send_message("You don't have permission to manage messages.", ephemeral=True)
         return
-    await interaction.response.defer()
-    deleted = await interaction.channel.purge(limit=amount)
-    await interaction.followup.send(f"Cleared {len(deleted)} messages.", ephemeral=True)
+    await interaction.response.send_message("Clearing all messages...", ephemeral=True)
+    await interaction.channel.purge(limit=None)
 
 if __name__ == "__main__":
     bot.run(TOKEN)
