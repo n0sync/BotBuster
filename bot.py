@@ -42,50 +42,90 @@ async def on_ready():
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("Pong!")
 
-@bot.tree.command(name="recommend", description="Get top 3 recommendations based on your watchlist")
+@bot.tree.command(name="recommend", description="Get 1 recommendation based on your watchlist")
 async def recommend(interaction: discord.Interaction):
     await interaction.response.defer()
     if not os.path.exists(WATCHLIST_FILE):
         await interaction.followup.send("Your watchlist is empty. Add some movies first!")
         return
+
     with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
         titles = [line.strip() for line in f if line.strip()]
+
     if not titles:
         await interaction.followup.send("Your watchlist is empty. Add some movies first!")
         return
-    results = await run_recommender(titles, top_n=3)
-    await interaction.followup.send("\n\n".join(results))
 
-@bot.tree.command(name="recommend_more", description="Get top 10 recommendations based on your watchlist")
-async def recommend_more(interaction: discord.Interaction):
+    results = await run_recommender(titles, top_n=1)
+    await interaction.followup.send(results[0])
+    
+
+@bot.tree.command(name="recommend_n", description="Get N recommendations based on your watchlist")
+async def recommend_n(interaction: discord.Interaction, number: int):
     await interaction.response.defer()
     if not os.path.exists(WATCHLIST_FILE):
         await interaction.followup.send("Your watchlist is empty. Add some movies first!")
         return
+
     with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
         titles = [line.strip() for line in f if line.strip()]
+
     if not titles:
         await interaction.followup.send("Your watchlist is empty. Add some movies first!")
         return
-    results = await run_recommender(titles, top_n=10)
+
+    results = await run_recommender(titles, top_n=number)
     combined = "\n\n".join(results)
+
     if len(combined) <= 2000:
         await interaction.followup.send(combined)
     else:
         for i in range(0, len(combined), 1900):
             await interaction.followup.send(combined[i:i+1900])
 
-@bot.tree.command(name="add_list", description="Add multiple movies at once (comma or newline separated)")
-async def add_list(interaction: discord.Interaction, movies: str):
-    raw_titles = re.split(r"\d+\.\s*|,|\n", movies)
-    titles = [re.sub(r"\[.*?\]", "", t).strip(" :.-") for t in raw_titles if t.strip()]
-    if not titles:
-        await interaction.response.send_message("No valid movie titles found.")
+class MovieListModal(discord.ui.Modal, title="Add Movies to Watchlist"):
+    movies_input = discord.ui.TextInput(
+        label="Movie Titles",
+        style=discord.TextStyle.paragraph,
+        placeholder="Enter movie titles (one per line or comma-separated)...",
+        required=True,
+        max_length=2000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        raw_titles = re.split(r"\d+\.\s*|,|\n|\r", self.movies_input.value)
+        titles = [re.sub(r"\[.*?\]", "", t).strip(" :.-") for t in raw_titles if t.strip()]
+
+        if not titles:
+            await interaction.followup.send("No valid movie titles found in your input.")
+            return
+
+        with open(WATCHLIST_FILE, "a", encoding="utf-8") as f:
+            for title in titles:
+                f.write(title + "\n")
+
+        await interaction.followup.send(f"Added {len(titles)} movies to your watchlist.")
+
+
+@bot.tree.command(name="add_list", description="Paste multiple movie titles at once")
+async def add_list(interaction: discord.Interaction):
+    modal = MovieListModal()
+    await interaction.response.send_modal(modal)
+
+
+@bot.tree.command(name="add_movie", description="Add a single movie to your watchlist")
+async def add_movie(interaction: discord.Interaction, movie: str):
+    movie = re.sub(r"\[.*?\]", "", movie).strip(" :.-")
+    if not movie:
+        await interaction.response.send_message("Invalid movie title.")
         return
+
     with open(WATCHLIST_FILE, "a", encoding="utf-8") as f:
-        for title in titles:
-            f.write(title + "\n")
-    await interaction.response.send_message(f"Added {len(titles)} movies to your watchlist.")
+        f.write(movie + "\n")
+
+    await interaction.response.send_message(f"Added **{movie}** to your watchlist.")
 
 @bot.tree.command(name="watchlist", description="Show your current watchlist")
 async def watchlist(interaction: discord.Interaction):
