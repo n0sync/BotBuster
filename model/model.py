@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
+import re
 from typing import List
-from scipy.sparse import hstack
+from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics.pairwise import cosine_similarity
@@ -21,6 +22,28 @@ class MovieRecommender:
         self.num_cols = ["vote_average", "popularity", "vote_count"]
         self.id_col = "id"
         self.title_col = "title"
+
+    def _normalize_text(self, s):
+        s = str(s).lower()
+        s = re.sub(r"[^a-z0-9 ]+", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def _normalize_list(self, s):
+        s = str(s)
+        if not s or s.lower() == "nan":
+            return ""
+        parts = re.split(r"[|,;/]", s)
+        parts = [self._normalize_text(p) for p in parts if p and p.lower() != "nan"]
+        return " ".join(sorted(set(parts)))
+
+    def _normalize_row(self, df):
+        df["genres"] = df["genres"].apply(self._normalize_list)
+        df["keywords"] = df["keywords"].apply(self._normalize_list)
+        df["cast"] = df["cast"].apply(self._normalize_list)
+        df["director"] = df["director"].apply(self._normalize_text)
+        df["overview"] = df["overview"].astype(str).apply(self._normalize_text)
+        return df
 
     def load(self):
         self.catalog = pd.read_csv(self.catalog_path)
@@ -47,60 +70,73 @@ class MovieRecommender:
             self.catalog[self.title_col] = ""
         if self.title_col not in self.user.columns:
             self.user[self.title_col] = ""
-        self.catalog = self.catalog[
-            (self.catalog["vote_average"] >= 6.5) &
-            (self.catalog["vote_count"] >= 500) &
-            (self.catalog["popularity"] >= self.catalog["popularity"].quantile(0.2)) &
-            (self.catalog["overview"].str.len() > 50)
-        ]
+        self.catalog = self._normalize_row(self.catalog)
+        self.user = self._normalize_row(self.user)
+        self.catalog["overview_len"] = self.catalog["overview"].str.len()
+        if len(self.catalog) > 0:
+            self.catalog = self.catalog[
+                (self.catalog["vote_average"] >= self.catalog["vote_average"].quantile(0.2)) &
+                (self.catalog["vote_count"] >= self.catalog["vote_count"].quantile(0.2)) &
+                (self.catalog["overview_len"] >= 30)
+            ].copy()
+        self.catalog.reset_index(drop=True, inplace=True)
 
-    def fit(self, max_features: int = 20000):
+    def fit(self, max_features: int = 30000):
         self.load()
-        weights = {"genres":0.3,"keywords":0.2,"overview":0.3,"cast":0.1,"director":0.1}
+        weights = {"genres":0.25,"keywords":0.2,"overview":0.35,"cast":0.1,"director":0.1}
         catalog_matrices = []
         user_matrices = []
         for col, w in weights.items():
-            vec = TfidfVectorizer(stop_words="english", max_features=max_features)
+            vec = TfidfVectorizer(stop_words="english", max_features=max_features, ngram_range=(1,2), min_df=2)
             all_text = pd.concat([self.catalog[col], self.user[col]], ignore_index=True)
             vec.fit(all_text)
             self.vectorizers[col] = vec
-            catalog_matrices.append(vec.transform(self.catalog[col]) * w)
-            user_matrices.append(vec.transform(self.user[col]) * w)
-        self.catalog_matrix = hstack(catalog_matrices)
-        self.user_matrix = hstack(user_matrices)
-        self.user_profile = np.asarray(self.user_matrix.mean(axis=0)).ravel()
-        self.catalog["num_features"] = self.scaler.fit_transform(
-            self.catalog[["vote_average","popularity"]].values
-        ).mean(axis=1)
+            cm = vec.transform(self.catalog[col])
+            um = vec.transform(self.user[col])
+            catalog_matrices.append(cm * w)
+            user_matrices.append(um * w)
+        self.catalog_matrix = hstack(catalog_matrices).tocsr()
+        self.user_matrix = hstack(user_matrices).tocsr()
+        if self.user_matrix.shape[0] > 0:
+            qa = self.user[["vote_average","popularity","vote_count"]].copy()
+            qa_scaled = MinMaxScaler().fit_transform(qa.values)
+            w = np.asarray(qa_scaled.mean(axis=1)).reshape(-1,1)
+            wm = csr_matrix(w.T)
+            self.user_profile = wm.dot(self.user_matrix).toarray().flatten()
+            n = np.linalg.norm(self.user_profile)
+            if n > 0:
+                self.user_profile = self.user_profile / n
+        else:
+            self.user_profile = np.zeros(self.catalog_matrix.shape[1])
+        if not self.catalog.empty:
+            num_scaled = self.scaler.fit_transform(self.catalog[["vote_average","popularity","vote_count"]].values)
+            self.catalog["num_score"] = num_scaled.mean(axis=1)
+        else:
+            self.catalog["num_score"] = 0.0
 
-    def recommend(self, top_n: int = 20, exclude_liked: bool = True, diversity: float = 0.0) -> pd.DataFrame:
+    def recommend(self, top_n: int = 20, exclude_liked: bool = True, diversity: float = 0.2) -> pd.DataFrame:
         sims = cosine_similarity(self.user_profile.reshape(1, -1), self.catalog_matrix).flatten()
         self.catalog["content_score"] = sims
-        self.catalog["hybrid_score"] = 0.9 * self.catalog["content_score"] + 0.1 * self.catalog["num_features"]
+        pop = self.catalog["popularity"].replace(0, np.nan).fillna(self.catalog["popularity"].median())
+        novelty = 1.0 - (pop / (pop.max() + 1e-8))
+        self.catalog["novelty_score"] = novelty
+        self.catalog["hybrid_score"] = (
+            0.65 * self.catalog["content_score"] +
+            0.2 * self.catalog["num_score"] +
+            0.15 * self.catalog["novelty_score"]
+        )
         if exclude_liked:
             liked_ids = set(self.user[self.id_col].tolist())
-            liked_titles = set(self.user[self.title_col].tolist())
-            mask = (~self.catalog[self.id_col].isin(liked_ids)) & (~self.catalog[self.title_col].isin(liked_titles))
+            liked_titles = set(self.user[self.title_col].astype(str).tolist())
+            mask = (~self.catalog[self.id_col].isin(liked_ids)) & (~self.catalog[self.title_col].astype(str).isin(liked_titles))
             ranked = self.catalog[mask].copy()
         else:
             ranked = self.catalog.copy()
         ranked = ranked.sort_values("hybrid_score", ascending=False)
-        if diversity > 0:
-            out = []
-            seen_genres = set()
-            for _, row in ranked.iterrows():
-                g = tuple(sorted(str(row["genres"]).split()))
-                if len(out) >= top_n:
-                    break
-                if np.random.rand() < diversity or g not in seen_genres:
-                    out.append(row)
-                    seen_genres.add(g)
-            result = pd.DataFrame(out)
-        else:
-            result = ranked.head(top_n)
+        result = ranked.head(top_n)
         cols = [self.id_col, self.title_col, "genres", "keywords", "director",
                 "cast", "overview", "vote_average", "popularity",
-                "content_score", "hybrid_score"]
+                "content_score", "num_score", "novelty_score", "hybrid_score"]
         return result[cols]
 
     def explain_recommendation(self, movie_row, user_movies):
@@ -116,20 +152,17 @@ class MovieRecommender:
         if movie_genres & user_genres:
             reasons.append(f"shares genres: {', '.join(sorted(movie_genres & user_genres))}")
         if movie_keywords & user_keywords:
-            reasons.append(f"explores themes: {', '.join(sorted(list(movie_keywords & user_keywords)[:2]))}")
+            reasons.append(f"explores themes: {', '.join(sorted(list(movie_keywords & user_keywords)[:3]))}")
         if movie_cast & user_cast:
-            reasons.append(f"features actors you liked: {', '.join(sorted(list(movie_cast & user_cast)[:2]))}")
-        if movie_director in user_directors:
+            reasons.append(f"features actors you liked: {', '.join(sorted(list(movie_cast & user_cast)[:3]))}")
+        if movie_director in user_directors and movie_director:
             reasons.append(f"directed by {movie_director}, also in your favorites")
+        if "novelty_score" in movie_row and movie_row["novelty_score"] > 0.6:
+            reasons.append("novel but highly relevant")
         if not reasons:
             reasons.append("shares narrative style with your watchlist")
         return " | ".join(reasons)
 
     def explain(self, k: int = 20) -> pd.DataFrame:
         vocab = np.array(self.vectorizers["overview"].get_feature_names_out())
-        user_vec = np.asarray(self.user_profile).flatten()
-        top_idx = user_vec.argsort()[::-1][:k]
-        tokens = vocab[top_idx]
-        weights = user_vec[top_idx]
-        df = pd.DataFrame({"token": tokens, "weight": weights})
-        return df.sort_values("weight", ascending=False)
+        user_vec = np.asarray(self.user_profile)
