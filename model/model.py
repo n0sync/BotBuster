@@ -83,7 +83,7 @@ class MovieRecommender:
 
     def fit(self, max_features: int = 30000):
         self.load()
-        weights = {"genres":0.25,"keywords":0.2,"overview":0.35,"cast":0.1,"director":0.1}
+        weights = {"genres":0.35,"keywords":0.3,"overview":0.3,"cast":0.1,"director":0.01}
         catalog_matrices = []
         user_matrices = []
         for col, w in weights.items():
@@ -114,7 +114,7 @@ class MovieRecommender:
         else:
             self.catalog["num_score"] = 0.0
 
-    def recommend(self, top_n: int = 20, exclude_liked: bool = True, diversity: float = 0.2) -> pd.DataFrame:
+    def recommend(self, top_n: int = 20, exclude_liked: bool = True, diversity: float = 0.5) -> pd.DataFrame:
         sims = cosine_similarity(self.user_profile.reshape(1, -1), self.catalog_matrix).flatten()
         self.catalog["content_score"] = sims
         pop = self.catalog["popularity"].replace(0, np.nan).fillna(self.catalog["popularity"].median())
@@ -165,4 +165,9 @@ class MovieRecommender:
 
     def explain(self, k: int = 20) -> pd.DataFrame:
         vocab = np.array(self.vectorizers["overview"].get_feature_names_out())
-        user_vec = np.asarray(self.user_profile)
+        user_vec = np.asarray(self.user_profile).flatten()
+        top_idx = user_vec.argsort()[::-1][:k]
+        tokens = vocab[top_idx]
+        weights = user_vec[top_idx]
+        df = pd.DataFrame({"token": tokens, "weight": weights})
+        return df.sort_values("weight", ascending=False)
