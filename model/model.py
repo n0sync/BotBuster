@@ -80,23 +80,29 @@ class MovieRecommender:
                 (self.catalog["overview_len"] >= 30)
             ].copy()
         self.catalog.reset_index(drop=True, inplace=True)
-
     def fit(self, max_features: int = 30000):
         self.load()
-        weights = {"genres":0.35,"keywords":0.3,"overview":0.3,"cast":0.1,"director":0.01}
+        weights = {"genres":0.35,"keywords":0.3,"overview":0.25,"cast":0.1,"director":0.0}
         catalog_matrices = []
         user_matrices = []
         for col, w in weights.items():
-            vec = TfidfVectorizer(stop_words="english", max_features=max_features, ngram_range=(1,2), min_df=2)
+            vec = TfidfVectorizer(stop_words="english",
+                                max_features=max_features,
+                                ngram_range=(1,2),
+                                min_df=2)
             all_text = pd.concat([self.catalog[col], self.user[col]], ignore_index=True)
             vec.fit(all_text)
+
             self.vectorizers[col] = vec
             cm = vec.transform(self.catalog[col])
             um = vec.transform(self.user[col])
+
             catalog_matrices.append(cm * w)
             user_matrices.append(um * w)
+
         self.catalog_matrix = hstack(catalog_matrices).tocsr()
         self.user_matrix = hstack(user_matrices).tocsr()
+
         if self.user_matrix.shape[0] > 0:
             qa = self.user[["vote_average","popularity","vote_count"]].copy()
             qa_scaled = MinMaxScaler().fit_transform(qa.values)
@@ -108,11 +114,38 @@ class MovieRecommender:
                 self.user_profile = self.user_profile / n
         else:
             self.user_profile = np.zeros(self.catalog_matrix.shape[1])
+
         if not self.catalog.empty:
-            num_scaled = self.scaler.fit_transform(self.catalog[["vote_average","popularity","vote_count"]].values)
+            num_scaled = self.scaler.fit_transform(
+                self.catalog[["vote_average","popularity","vote_count"]].values
+            )
             self.catalog["num_score"] = num_scaled.mean(axis=1)
         else:
             self.catalog["num_score"] = 0.0
+
+
+    def _mmr(self, candidates, top_n, lambda_div=0.5):
+        selected = []
+        candidate_indices = candidates.index.tolist()
+        while len(selected) < top_n and candidate_indices:
+            if not selected:
+                best_idx = candidate_indices[0]
+                selected.append(best_idx)
+                candidate_indices.pop(0)
+                continue
+            # compute similarity between remaining candidates and already selected
+            cand_vecs = self.catalog_matrix[candidate_indices]
+            sel_vecs = self.catalog_matrix[selected]
+            sims = cosine_similarity(cand_vecs, sel_vecs).max(axis=1)
+            # relevance = hybrid_score for each candidate
+            relevance = candidates.loc[candidate_indices, "hybrid_score"].values
+            mmr_score = lambda_div * relevance - (1 - lambda_div) * sims
+            best_pos = mmr_score.argmax()
+            best_idx = candidate_indices[best_pos]
+            selected.append(best_idx)
+            candidate_indices.pop(best_pos)
+        return candidates.loc[selected]
+
 
     def recommend(self, top_n: int = 20, exclude_liked: bool = True, diversity: float = 0.5) -> pd.DataFrame:
         sims = cosine_similarity(self.user_profile.reshape(1, -1), self.catalog_matrix).flatten()
@@ -121,9 +154,9 @@ class MovieRecommender:
         novelty = 1.0 - (pop / (pop.max() + 1e-8))
         self.catalog["novelty_score"] = novelty
         self.catalog["hybrid_score"] = (
-            0.65 * self.catalog["content_score"] +
+            0.6 * self.catalog["content_score"] +
             0.2 * self.catalog["num_score"] +
-            0.15 * self.catalog["novelty_score"]
+            0.2 * self.catalog["novelty_score"]
         )
         if exclude_liked:
             liked_ids = set(self.user[self.id_col].tolist())
@@ -133,7 +166,8 @@ class MovieRecommender:
         else:
             ranked = self.catalog.copy()
         ranked = ranked.sort_values("hybrid_score", ascending=False)
-        result = ranked.head(top_n)
+        ranked = ranked.drop_duplicates(subset=["title"]).reset_index(drop=True)
+        result = self._mmr(ranked, top_n, lambda_div=diversity)
         cols = [self.id_col, self.title_col, "genres", "keywords", "director",
                 "cast", "overview", "vote_average", "popularity",
                 "content_score", "num_score", "novelty_score", "hybrid_score"]
