@@ -1,5 +1,4 @@
 import os
-import re
 import pandas as pd
 from dotenv import load_dotenv
 from data.data import TMDBMovieFetcher
@@ -12,8 +11,9 @@ async def run_recommender(new_titles: list[str], top_n: int = 3):
         return ["Error: TMDB_API_KEY not found in .env file!"]
 
     fetcher = TMDBMovieFetcher(api_key)
-    movie_titles = fetcher.read_txt_files(".")
-    movie_titles = list(set(movie_titles))
+    movie_titles = set(fetcher.read_txt_files("."))
+    movie_titles.update(new_titles)
+    movie_titles = list(movie_titles)
 
     movies_data = await fetcher.fetch_all_movies(movie_titles)
     if not movies_data:
@@ -21,9 +21,12 @@ async def run_recommender(new_titles: list[str], top_n: int = 3):
 
     fetcher.save_to_csv(movies_data)
 
-    recommender = MovieRecommender(catalog_path="data/movies.csv", user_path="watchlist.csv")
+    recommender = MovieRecommender(
+        catalog_path="data/movies.csv",
+        user_path="watchlist.csv"
+    )
     recommender.fit()
-    recs = recommender.recommend(top_n=top_n)
+    recs = recommender.recommend(top_n=top_n, diversity=0.5)
 
     results = []
     seen = set()
@@ -32,10 +35,10 @@ async def run_recommender(new_titles: list[str], top_n: int = 3):
         if not title or title in seen:
             continue
         seen.add(title)
-        reason = str(recommender.explain_recommendation(row, recommender.user))
-        overview = str(row.get("overview", ""))
+        reason = recommender.explain_recommendation(row, recommender.user)
+        overview = str(row.get("overview", "")).strip()
         if len(overview) > 200:
-            overview = overview[:200] + "..."
+            overview = overview[:200].rsplit(" ", 1)[0] + "..."
         results.append(f"**{title}**\nWhy watch: {reason}\nOverview: {overview}\n")
 
     return results if results else ["No recommendations could be generated."]
