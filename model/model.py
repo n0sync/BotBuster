@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
 import re
-from typing import List
+from typing import List, Optional
+from collections import deque
 from scipy.sparse import hstack, csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import MinMaxScaler
@@ -22,6 +23,8 @@ class MovieRecommender:
         self.num_cols = ["vote_average", "popularity", "vote_count"]
         self.id_col = "id"
         self.title_col = "title"
+        self.recent_history = deque(maxlen=100)
+        self.random_seed: Optional[int] = None
 
     def _normalize_text(self, s):
         s = str(s).lower()
@@ -108,10 +111,13 @@ class MovieRecommender:
             qa_scaled = MinMaxScaler().fit_transform(qa.values)
             w = np.asarray(qa_scaled.mean(axis=1)).reshape(-1,1)
             wm = csr_matrix(w.T)
-            self.user_profile = wm.dot(self.user_matrix).toarray().flatten()
-            n = np.linalg.norm(self.user_profile)
-            if n > 0:
-                self.user_profile = self.user_profile / n
+            try:
+                self.user_profile = wm.dot(self.user_matrix).toarray().flatten()
+                n = np.linalg.norm(self.user_profile)
+                if n > 0:
+                    self.user_profile = self.user_profile / n
+            except Exception:
+                self.user_profile = np.zeros(self.catalog_matrix.shape[1])
         else:
             self.user_profile = np.zeros(self.catalog_matrix.shape[1])
 
@@ -133,11 +139,9 @@ class MovieRecommender:
                 selected.append(best_idx)
                 candidate_indices.pop(0)
                 continue
-            # compute similarity between remaining candidates and already selected
             cand_vecs = self.catalog_matrix[candidate_indices]
             sel_vecs = self.catalog_matrix[selected]
             sims = cosine_similarity(cand_vecs, sel_vecs).max(axis=1)
-            # relevance = hybrid_score for each candidate
             relevance = candidates.loc[candidate_indices, "hybrid_score"].values
             mmr_score = lambda_div * relevance - (1 - lambda_div) * sims
             best_pos = mmr_score.argmax()
@@ -146,8 +150,82 @@ class MovieRecommender:
             candidate_indices.pop(best_pos)
         return candidates.loc[selected]
 
+    def _softmax(self, x: np.ndarray, temperature: float = 1.0) -> np.ndarray:
+        if temperature <= 0:
+            temperature = 1e-6
+        x = np.array(x, dtype=float)
+        x = x - x.max()
+        exp = np.exp(x / temperature)
+        s = exp / (exp.sum() + 1e-12)
+        return s
 
-    def recommend(self, top_n: int = 20, exclude_liked: bool = True, diversity: float = 0.5) -> pd.DataFrame:
+    def _stochastic_diverse_selection(self, candidates: pd.DataFrame, top_n: int,
+                                      diversity: float = 0.5, temperature: float = 0.7,
+                                      exclude_ids: Optional[set] = None) -> pd.DataFrame:
+        if candidates.empty:
+            return candidates
+        # prepare numeric arrays
+        scores = candidates['hybrid_score'].fillna(0.0).values.astype(float)
+        # initialize RNG
+        rng = np.random.RandomState(self.random_seed)
+        # mask out excluded ids
+        if exclude_ids:
+            mask_excl = candidates[self.id_col].isin(exclude_ids)
+            scores = np.where(mask_excl, -np.inf, scores)
+
+        selected_idx = []
+        candidate_idx = list(range(len(candidates)))
+
+        try:
+            vecs = self.catalog_matrix[candidates.index]
+            sim_matrix = cosine_similarity(vecs)
+        except Exception:
+            sim_matrix = None
+
+        for _ in range(min(top_n, len(candidate_idx))):
+            # convert scores to probabilities
+            probs = self._softmax(scores, temperature)
+            # ensure we only consider remaining candidates
+            probs = np.where(np.isfinite(scores) & (scores > -np.inf), probs, 0.0)
+            if probs.sum() <= 0:
+                # fallback to greedy by score
+                remaining = [i for i in candidate_idx if i not in selected_idx]
+                remaining_scores = [(i, scores[i]) for i in remaining]
+                remaining_scores.sort(key=lambda x: x[1], reverse=True)
+                choice = remaining_scores[0][0]
+            else:
+                choice = rng.choice(len(probs), p=probs)
+                # if chosen already or invalid, fallback
+                tries = 0
+                while (choice in selected_idx or scores[choice] == -np.inf) and tries < 20:
+                    choice = rng.choice(len(probs), p=probs)
+                    tries += 1
+                if choice in selected_idx or scores[choice] == -np.inf:
+                    # choose highest remaining
+                    remaining = [i for i in candidate_idx if i not in selected_idx and scores[i] > -np.inf]
+                    if not remaining:
+                        break
+                    choice = max(remaining, key=lambda i: scores[i])
+
+            selected_idx.append(choice)
+            # penalize similarity to chosen item to increase diversity
+            if sim_matrix is not None:
+                sims = sim_matrix[choice]
+                penalty = (1.0 - diversity) * sims
+                scores = scores - penalty
+            # make sure chosen won't be picked again
+            scores[choice] = -np.inf
+
+        sel_positions = [candidates.index[i] for i in selected_idx]
+        return candidates.loc[sel_positions]
+
+
+    def recommend(self, top_n: int = 20, exclude_liked: bool = True, diversity: float = 0.5,
+                  stochastic: bool = True, temperature: float = 0.7, seed: Optional[int] = None,
+                  history_exclude: bool = True) -> pd.DataFrame:
+        # allow caller to set seed for reproducibility
+        self.random_seed = seed
+
         sims = cosine_similarity(self.user_profile.reshape(1, -1), self.catalog_matrix).flatten()
         self.catalog["content_score"] = sims
         pop = self.catalog["popularity"].replace(0, np.nan).fillna(self.catalog["popularity"].median())
@@ -167,10 +245,31 @@ class MovieRecommender:
             ranked = self.catalog.copy()
         ranked = ranked.sort_values("hybrid_score", ascending=False)
         ranked = ranked.drop_duplicates(subset=["title"]).reset_index(drop=True)
-        result = self._mmr(ranked, top_n, lambda_div=diversity)
+        exclude_ids = set()
+        if history_exclude and len(self.recent_history) > 0:
+            exclude_ids.update(set(self.recent_history))
+
+        if stochastic:
+            # pick a larger candidate pool then sample for diversity
+            candidate_pool = ranked.head(max(200, top_n * 10)).copy()
+            result = self._stochastic_diverse_selection(candidate_pool, top_n,
+                                                       diversity=diversity,
+                                                       temperature=temperature,
+                                                       exclude_ids=exclude_ids)
+        else:
+            # deterministic MMR selection
+            if exclude_ids:
+                ranked = ranked[~ranked[self.id_col].isin(exclude_ids)].copy()
+            result = self._mmr(ranked, top_n, lambda_div=diversity)
         cols = [self.id_col, self.title_col, "genres", "keywords", "director",
                 "cast", "overview", "vote_average", "popularity",
                 "content_score", "num_score", "novelty_score", "hybrid_score"]
+        try:
+            for mid in result[self.id_col].tolist():
+                self.recent_history.append(mid)
+        except Exception:
+            pass
+
         return result[cols]
 
     def explain_recommendation(self, movie_row, user_movies):
