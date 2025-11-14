@@ -164,11 +164,8 @@ class MovieRecommender:
                                       exclude_ids: Optional[set] = None) -> pd.DataFrame:
         if candidates.empty:
             return candidates
-        # prepare numeric arrays
         scores = candidates['hybrid_score'].fillna(0.0).values.astype(float)
-        # initialize RNG
         rng = np.random.RandomState(self.random_seed)
-        # mask out excluded ids
         if exclude_ids:
             mask_excl = candidates[self.id_col].isin(exclude_ids)
             scores = np.where(mask_excl, -np.inf, scores)
@@ -183,37 +180,30 @@ class MovieRecommender:
             sim_matrix = None
 
         for _ in range(min(top_n, len(candidate_idx))):
-            # convert scores to probabilities
             probs = self._softmax(scores, temperature)
-            # ensure we only consider remaining candidates
             probs = np.where(np.isfinite(scores) & (scores > -np.inf), probs, 0.0)
             if probs.sum() <= 0:
-                # fallback to greedy by score
                 remaining = [i for i in candidate_idx if i not in selected_idx]
                 remaining_scores = [(i, scores[i]) for i in remaining]
                 remaining_scores.sort(key=lambda x: x[1], reverse=True)
                 choice = remaining_scores[0][0]
             else:
                 choice = rng.choice(len(probs), p=probs)
-                # if chosen already or invalid, fallback
                 tries = 0
                 while (choice in selected_idx or scores[choice] == -np.inf) and tries < 20:
                     choice = rng.choice(len(probs), p=probs)
                     tries += 1
                 if choice in selected_idx or scores[choice] == -np.inf:
-                    # choose highest remaining
                     remaining = [i for i in candidate_idx if i not in selected_idx and scores[i] > -np.inf]
                     if not remaining:
                         break
                     choice = max(remaining, key=lambda i: scores[i])
 
             selected_idx.append(choice)
-            # penalize similarity to chosen item to increase diversity
             if sim_matrix is not None:
                 sims = sim_matrix[choice]
                 penalty = (1.0 - diversity) * sims
                 scores = scores - penalty
-            # make sure chosen won't be picked again
             scores[choice] = -np.inf
 
         sel_positions = [candidates.index[i] for i in selected_idx]
@@ -223,7 +213,6 @@ class MovieRecommender:
     def recommend(self, top_n: int = 20, exclude_liked: bool = True, diversity: float = 0.5,
                   stochastic: bool = True, temperature: float = 0.7, seed: Optional[int] = None,
                   history_exclude: bool = True) -> pd.DataFrame:
-        # allow caller to set seed for reproducibility
         self.random_seed = seed
 
         sims = cosine_similarity(self.user_profile.reshape(1, -1), self.catalog_matrix).flatten()
@@ -250,14 +239,12 @@ class MovieRecommender:
             exclude_ids.update(set(self.recent_history))
 
         if stochastic:
-            # pick a larger candidate pool then sample for diversity
             candidate_pool = ranked.head(max(200, top_n * 10)).copy()
             result = self._stochastic_diverse_selection(candidate_pool, top_n,
                                                        diversity=diversity,
                                                        temperature=temperature,
                                                        exclude_ids=exclude_ids)
         else:
-            # deterministic MMR selection
             if exclude_ids:
                 ranked = ranked[~ranked[self.id_col].isin(exclude_ids)].copy()
             result = self._mmr(ranked, top_n, lambda_div=diversity)

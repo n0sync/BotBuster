@@ -160,6 +160,6 @@ async def clear_messages(interaction: discord.Interaction):
         return
     await interaction.response.defer(ephemeral=True)
     await interaction.channel.purge(limit=None)
-
+    
 if __name__ == "__main__":
     bot.run(TOKEN)
