@@ -1,5 +1,4 @@
 import os
-import pandas as pd
 from dotenv import load_dotenv
 from data.data import TMDBMovieFetcher
 from model.model import MovieRecommender
@@ -25,8 +24,22 @@ async def run_recommender(new_titles: list[str], top_n: int = 3):
         catalog_path="data/movies.csv",
         user_path="watchlist.csv"
     )
-    recommender.fit()
-    recs = recommender.recommend(top_n=top_n, diversity=0.5)
+    seed_env = os.getenv("RECOMMENDER_SEED")
+    seed = int(seed_env) if seed_env and seed_env.isdigit() else None
+    temp_env = os.getenv("RECOMMENDER_TEMPERATURE")
+    try:
+        temperature = float(temp_env) if temp_env is not None else 0.7
+    except Exception:
+        temperature = 0.7
+    stochastic_env = os.getenv("RECOMMENDER_STOCHASTIC", "true").lower()
+    stochastic = stochastic_env in ("1", "true", "yes", "y")
+    history_env = os.getenv("RECOMMENDER_HISTORY_EXCLUDE", "true").lower()
+    history_exclude = history_env in ("1", "true", "yes", "y")
+    try:
+        recommender.fit()
+        recs = recommender.recommend(top_n=top_n, diversity=0.5, stochastic=stochastic, temperature=temperature, seed=seed, history_exclude=history_exclude)
+    except Exception as e:
+        return [f"Error generating recommendations: {e}"]
 
     results = []
     seen = set()
