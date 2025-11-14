@@ -158,7 +158,7 @@ async def clear_messages(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.manage_messages:
         await interaction.response.send_message("You don't have permission to manage messages.", ephemeral=True)
         return
-    await interaction.response.send_message("Clearing all messages...", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
     await interaction.channel.purge(limit=None)
 
 if __name__ == "__main__":
