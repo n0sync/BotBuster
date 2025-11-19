@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from discord import app_commands
-from main import run_model
+from src.main import run_model
 from flask import Flask
 from threading import Thread
 import logging
