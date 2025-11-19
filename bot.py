@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from discord import app_commands
-from script import run_recommender
+from main import run_model
 from flask import Flask
 from threading import Thread
 import logging
@@ -56,7 +56,7 @@ async def recommend(interaction: discord.Interaction):
         await interaction.followup.send("Your watchlist is empty. Add some movies first!")
         return
 
-    results = await run_recommender(titles, top_n=1)
+    results = await run_model(titles, top_n=1)
     await interaction.followup.send(results[0])
     
 
@@ -74,7 +74,7 @@ async def recommend_n(interaction: discord.Interaction, number: int):
         await interaction.followup.send("Your watchlist is empty. Add some movies first!")
         return
 
-    results = await run_recommender(titles, top_n=number)
+    results = await run_model(titles, top_n=number)
     combined = "\n\n".join(results)
 
     if len(combined) <= 2000:
