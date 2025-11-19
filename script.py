@@ -52,6 +52,6 @@ async def run_recommender(new_titles: list[str], top_n: int = 3):
         overview = str(row.get("overview", "")).strip()
         if len(overview) > 200:
             overview = overview[:200].rsplit(" ", 1)[0] + "..."
-        results.append(f"**{title}**\nWhy watch: {reason}\nOverview: {overview}\n")
+        results.append(f"🎬 **{title}**\nWhy watch: {reason}\nOverview: {overview}\n")
 
     return results if results else ["No recommendations could be generated."]
