@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
-from data.data import TMDBMovieFetcher
-from model.model import MovieRecommender
+from src.data.data import TMDBMovieFetcher
+from src.model.model import MovieRecommender
 
 async def run_model(new_titles: list[str], top_n: int = 3):
     load_dotenv()
@@ -21,7 +21,7 @@ async def run_model(new_titles: list[str], top_n: int = 3):
     fetcher.save_to_csv(movies_data)
 
     recommender = MovieRecommender(
-        catalog_path="data/movies.csv",
+        catalog_path="src/data/movies.csv",
         user_path="watchlist.csv"
     )
     seed_env = os.getenv("RECOMMENDER_SEED")
