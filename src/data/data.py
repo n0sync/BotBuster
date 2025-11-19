@@ -92,8 +92,18 @@ class TMDBMovieFetcher:
 
     async def fetch_all_movies(self, titles: List[str]) -> List[Dict]:
         if Path("watchlist.csv").exists():
-            print("✓ watchlist.csv already exists, skipping fetch.")
-            return pd.read_csv("watchlist.csv").to_dict(orient="records")
+            try:
+                df = pd.read_csv("watchlist.csv")
+                if not df.empty and len(df.columns) > 0:
+                    print("✓ watchlist.csv already exists, skipping fetch.")
+                    return df.to_dict(orient="records")
+                else:
+                    print("⚠ watchlist.csv is empty or invalid, regenerating...")
+                    Path("watchlist.csv").unlink()
+            except Exception as e:
+                print(f"⚠ Error reading watchlist.csv ({e}), regenerating...")
+                Path("watchlist.csv").unlink(missing_ok=True)
+                
         movies_data = []
         connector = aiohttp.TCPConnector(limit=10)
         async with aiohttp.ClientSession(connector=connector, headers=self.headers) as session:
