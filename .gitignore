@@ -37,6 +37,7 @@ pip-log.txt
 pip-delete-this-directory.txt
 watchlist.csv
 # Unit test / coverage reports
+watchlist.txt
 htmlcov/
 .tox/
 .nox/
