@@ -87,11 +87,11 @@ class MovieRecommender:
         self.load()
         
         weights = {
-            "overview": 0.35,
-            "keywords": 0.30,
-            "director": 0.20,
-            "genres": 0.10,
-            "cast": 0.05
+            "overview": 0.40,
+            "keywords": 0.35,
+            "director": 0.15,
+            "genres": 0.07,
+            "cast": 0.03
         }
         
         catalog_matrices = []
@@ -121,7 +121,7 @@ class MovieRecommender:
 
         num_data = self.catalog[["vote_average", "vote_count"]].values
         num_scaled = self.scaler.fit_transform(num_data)
-        self.catalog["num_score"] = 0.7 * num_scaled[:, 0] + 0.3 * num_scaled[:, 1]
+        self.catalog["num_score"] = 0.75 * num_scaled[:, 0] + 0.25 * num_scaled[:, 1]
 
 
     def _mmr(self, candidates, top_n, lambda_div=0.5):
@@ -215,62 +215,188 @@ class MovieRecommender:
         self.catalog["content_score"] = sims
         
         self.catalog["hybrid_score"] = (
-            0.80 * self.catalog["content_score"] +
-            0.20 * self.catalog["num_score"]
+            0.70 * self.catalog["content_score"] +
+            0.30 * self.catalog["num_score"]
         )
+        
+        user_genre_tokens = " ".join(self.user["genres"]).lower().split()
+        user_genre_freq = pd.Series(user_genre_tokens).value_counts(normalize=True)
+        
+        adult_preferred_genres = {"thriller", "mystery", "science", "fiction", "psychological", "drama", "horror", "noir", "crime"}
+        hard_blacklist_genres = {"family", "animation", "comedy", "romance", "musical", "adventure", "documentary", "fantasy", "western"}
+        
+        def strict_tone_filter(row):
+            keywords_lower = str(row.get("keywords", "")).lower()
+            overview_lower = str(row.get("overview", "")).lower()
+            genres_lower = str(row.get("genres", "")).lower()
+            combined = keywords_lower + " " + overview_lower + " " + genres_lower
+            
+            catalog_genres = set(genres_lower.split())
+            
+            if catalog_genres & hard_blacklist_genres:
+                return -999.0
+            
+            ya_scifi_markers = ["young adult", "ya", "teen", "teenager", "high school", 
+                               "coming of age", "chosen one", "hero journey", "save the world"]
+            whimsical_markers = ["whimsical", "magical", "enchanted", "fairy", "wizard", 
+                               "heartwarming", "feel good", "uplifting", "cheerful", "joyful"]
+            sentimental_markers = ["inspirational", "triumph", "overcome", "heartfelt", 
+                                  "touching", "emotional journey", "life affirming"]
+            family_markers = ["family", "kids", "children", "animated", "animation", "disney"]
+            war_drama_markers = ["war", "wwii", "world war", "vietnam", "soldier", "military", 
+                                "veteran", "battle", "combat", "based on true story", 
+                                "true story", "real story", "biography"]
+            
+            penalty = 0.0
+            
+            for marker in ya_scifi_markers:
+                if marker in combined:
+                    penalty -= 50.0
+            
+            for marker in whimsical_markers:
+                if marker in combined:
+                    penalty -= 40.0
+            
+            for marker in sentimental_markers:
+                if marker in combined:
+                    penalty -= 35.0
+            
+            for marker in family_markers:
+                if marker in combined:
+                    penalty -= 60.0
+            
+            war_count = 0
+            for marker in war_drama_markers:
+                if marker in combined:
+                    war_count += 1
+            
+            if war_count >= 2:
+                penalty -= 45.0
+            elif war_count == 1:
+                penalty -= 15.0
+            
+            return penalty
+        
+        tone_filter_scores = self.catalog.apply(strict_tone_filter, axis=1)
+        self.catalog["hybrid_score"] += tone_filter_scores
+        
+        user_keywords = set()
+        for k in self.user["keywords"].astype(str):
+            tokens = str(k).lower().split()
+            user_keywords.update(t for t in tokens if t and t != "nan")
+        
+        psychological_adult = {"psychological", "psycho", "mind", "consciousness", "identity", 
+                              "memory", "mental", "perception", "paranoia", "obsession", 
+                              "madness", "insanity", "dissociation"}
+        
+        cerebral_adult = {"cerebral", "intellectual", "complex", "philosophical", "existential", 
+                         "metaphysical", "abstract", "thought provoking", "morality", "ethics"}
+        
+        noir_dark_adult = {"noir", "dark", "gritty", "brutal", "violent", "bleak", "disturbing", 
+                          "intense", "haunting", "pessimistic", "cynical", "nihilistic"}
+        
+        scifi_adult_hard = {"dystopian", "dystopia", "cyberpunk", "artificial intelligence", 
+                           "consciousness", "simulation", "reality", "time paradox", "multiverse",
+                           "posthuman", "transhumanism", "singularity"}
+        
+        scifi_space_adult = {"space exploration", "alien contact", "first contact", "cosmic horror",
+                            "deep space", "interstellar"}
+        
+        thriller_adult = {"thriller", "suspense", "mystery", "conspiracy", "detective",
+                         "investigation", "murder", "crime", "twist", "noir"}
+        
+        user_has_psychological = bool(user_keywords & psychological_adult)
+        user_has_cerebral = bool(user_keywords & cerebral_adult)
+        user_has_noir = bool(user_keywords & noir_dark_adult)
+        user_has_hard_scifi = bool(user_keywords & scifi_adult_hard)
+        user_has_space_scifi = bool(user_keywords & scifi_space_adult)
+        user_has_thriller = bool(user_keywords & thriller_adult)
+        
+        def adult_tone_boost(row):
+            movie_kw = set(str(row.get("keywords", "")).lower().split())
+            movie_overview = str(row.get("overview", "")).lower()
+            movie_kw.discard("")
+            movie_kw.discard("nan")
+            
+            boost = 0.0
+            
+            if user_has_psychological and (movie_kw & psychological_adult):
+                boost += 0.25
+            
+            if user_has_cerebral and (movie_kw & cerebral_adult):
+                boost += 0.22
+            
+            if user_has_noir and (movie_kw & noir_dark_adult):
+                boost += 0.20
+            
+            if user_has_hard_scifi and (movie_kw & scifi_adult_hard):
+                boost += 0.25
+            
+            if user_has_space_scifi and (movie_kw & scifi_space_adult):
+                boost += 0.15
+            
+            if user_has_thriller and (movie_kw & thriller_adult):
+                boost += 0.18
+            
+            adult_marker_count = sum([
+                bool(movie_kw & psychological_adult),
+                bool(movie_kw & cerebral_adult),
+                bool(movie_kw & noir_dark_adult),
+                bool(movie_kw & scifi_adult_hard),
+                bool(movie_kw & thriller_adult)
+            ])
+            
+            if adult_marker_count >= 2:
+                boost += 0.15
+            
+            return boost
+        
+        adult_boosts = self.catalog.apply(adult_tone_boost, axis=1)
+        self.catalog["hybrid_score"] += adult_boosts
+        
+        def genre_alignment_score(row):
+            catalog_genres = set(str(row["genres"]).lower().split())
+            
+            base_score = sum(user_genre_freq.get(g, 0) for g in catalog_genres)
+            adult_match = len(catalog_genres & adult_preferred_genres) * 0.10
+            
+            return base_score + adult_match
+        
+        self.catalog["genre_alignment"] = self.catalog.apply(genre_alignment_score, axis=1)
+        self.catalog["hybrid_score"] += 0.15 * self.catalog["genre_alignment"]
         
         user_directors = set(
             d.strip() for d in self.user["director"].dropna().str.lower() 
             if d and str(d).strip() and str(d).lower() != "nan"
         )
         
-        def director_match(director):
-            d = str(director).lower().strip()
-            return 1.0 if (d and d != "nan" and d in user_directors) else 0.0
+        def director_match_with_tone_gate(row):
+            director = str(row.get("director", "")).lower().strip()
+            
+            if not director or director == "nan" or director not in user_directors:
+                return 0.0
+            
+            movie_kw = set(str(row.get("keywords", "")).lower().split())
+            movie_genres = set(str(row.get("genres", "")).lower().split())
+            
+            if movie_genres & hard_blacklist_genres:
+                return 0.0
+            
+            has_adult_tone = bool(
+                (movie_kw & psychological_adult) or
+                (movie_kw & cerebral_adult) or
+                (movie_kw & noir_dark_adult) or
+                (movie_kw & scifi_adult_hard) or
+                (movie_kw & thriller_adult)
+            )
+            
+            if has_adult_tone:
+                return 1.0
+            else:
+                return 0.0
         
-        director_boost = self.catalog["director"].apply(director_match) * 0.20
+        director_boost = self.catalog.apply(director_match_with_tone_gate, axis=1) * 0.10
         self.catalog["hybrid_score"] += director_boost
-        
-        user_genre_tokens = " ".join(self.user["genres"]).lower().split()
-        user_genre_freq = pd.Series(user_genre_tokens).value_counts(normalize=True)
-        
-        preferred_genres = {"thriller", "mystery", "science", "fiction", "psychological", "drama", "horror"}
-        negative_genres = {"family", "animation", "comedy", "romance", "musical", "adventure"}
-        
-        def genre_alignment_score(row):
-            catalog_genres = set(str(row["genres"]).lower().split())
-            
-            base_score = sum(user_genre_freq.get(g, 0) for g in catalog_genres)
-            
-            preferred_match = len(catalog_genres & preferred_genres) * 0.05
-            negative_match = len(catalog_genres & negative_genres) * -0.15
-            
-            return base_score + preferred_match + negative_match
-        
-        self.catalog["genre_alignment"] = self.catalog.apply(genre_alignment_score, axis=1)
-        self.catalog["hybrid_score"] += 0.15 * self.catalog["genre_alignment"]
-        
-        def tone_penalty(row):
-            keywords_lower = str(row.get("keywords", "")).lower()
-            overview_lower = str(row.get("overview", "")).lower()
-            combined = keywords_lower + " " + overview_lower
-            
-            light_terms = ["heartwarming", "feel good", "uplifting", "cheerful", "joyful", 
-                          "lighthearted", "fun", "playful", "whimsical"]
-            family_terms = ["family", "kids", "children", "animated"]
-            
-            penalty = 0.0
-            for term in light_terms:
-                if term in combined:
-                    penalty -= 0.08
-            for term in family_terms:
-                if term in combined:
-                    penalty -= 0.12
-            
-            return penalty
-        
-        tone_penalties = self.catalog.apply(tone_penalty, axis=1)
-        self.catalog["hybrid_score"] += tone_penalties
         
         if exclude_liked:
             liked_ids = set(self.user[self.id_col].tolist())
@@ -280,6 +406,28 @@ class MovieRecommender:
             ranked = self.catalog[mask].copy()
         else:
             ranked = self.catalog.copy()
+        
+        ranked = ranked[ranked["hybrid_score"] > -10.0].copy()
+        
+        def final_tone_validation(row):
+            keywords_lower = str(row.get("keywords", "")).lower()
+            overview_lower = str(row.get("overview", "")).lower()
+            genres_lower = str(row.get("genres", "")).lower()
+            
+            forbidden_patterns = [
+                "young adult", "ya", "teen romance", "high school", "coming of age",
+                "heartwarming", "feel good", "family friendly", "disney", "pixar",
+                "whimsical", "magical", "enchanted", "fairy tale", "chosen one",
+                "inspirational", "triumph", "heartfelt", "life affirming"
+            ]
+            
+            for pattern in forbidden_patterns:
+                if pattern in keywords_lower or pattern in overview_lower or pattern in genres_lower:
+                    return False
+            
+            return True
+        
+        ranked = ranked[ranked.apply(final_tone_validation, axis=1)].copy()
         
         ranked = ranked.sort_values("hybrid_score", ascending=False)
         ranked = ranked.drop_duplicates(subset=["title"]).reset_index(drop=True)
@@ -329,23 +477,19 @@ class MovieRecommender:
             tokens = str(c).lower().split()
             user_cast.update(t for t in tokens if t and t != "nan")
         
-        user_directors = set()
-        for d in user_movies["director"].astype(str):
-            d_clean = str(d).lower().strip()
-            if d_clean and d_clean != "nan":
-                user_directors.add(d_clean)
-        
-        user_titles = set()
-        for t in user_movies["title"].astype(str):
-            t_clean = str(t).strip()
-            if t_clean:
-                user_titles.add(t_clean)
+        user_directors = {}
+        for idx, row in user_movies.iterrows():
+            director = str(row["director"]).lower().strip()
+            title = str(row["title"]).strip()
+            if director and director != "nan" and title:
+                if director not in user_directors:
+                    user_directors[director] = []
+                user_directors[director].append(title)
         
         movie_genres = set(str(movie_row.get("genres", "")).lower().split())
         movie_keywords = set(str(movie_row.get("keywords", "")).lower().split())
         movie_cast = set(str(movie_row.get("cast", "")).lower().split())
         movie_director = str(movie_row.get("director", "")).lower().strip()
-        movie_overview = str(movie_row.get("overview", "")).lower()
         
         movie_genres.discard("")
         movie_genres.discard("nan")
@@ -356,12 +500,24 @@ class MovieRecommender:
         
         psychological_keywords = {
             "psychological", "psycho", "mind", "consciousness", "identity", "memory",
-            "mental", "perception", "reality", "paranoia", "obsession", "madness"
+            "mental", "perception", "reality", "paranoia", "obsession", "madness",
+            "insanity", "dissociation", "schizophrenia", "delusion"
         }
         
-        scifi_keywords = {
-            "sci", "fi", "science", "fiction", "dystopian", "dystopia", "futuristic",
-            "future", "artificial", "intelligence", "space", "alien", "technology"
+        cerebral_keywords = {
+            "cerebral", "intellectual", "complex", "philosophical", "existential",
+            "metaphysical", "abstract", "thought", "provoking", "morality", "ethics"
+        }
+        
+        noir_keywords = {
+            "noir", "dark", "gritty", "brutal", "violent", "bleak", "disturbing",
+            "intense", "haunting", "pessimistic", "cynical", "nihilistic"
+        }
+        
+        scifi_adult_keywords = {
+            "dystopian", "dystopia", "cyberpunk", "artificial", "intelligence",
+            "consciousness", "simulation", "time", "paradox", "multiverse",
+            "posthuman", "transhumanism", "singularity", "space", "alien"
         }
         
         thriller_keywords = {
@@ -369,91 +525,84 @@ class MovieRecommender:
             "investigation", "murder", "crime", "twist"
         }
         
-        dark_keywords = {
-            "dark", "noir", "gritty", "brutal", "violent", "bleak",
-            "disturbing", "intense", "haunting"
-        }
-        
-        cerebral_keywords = {
-            "cerebral", "intellectual", "complex", "philosophical",
-            "existential", "metaphysical", "abstract", "thought", "provoking"
-        }
-        
-        all_tone_keywords = (psychological_keywords | scifi_keywords | 
-                            thriller_keywords | dark_keywords | cerebral_keywords)
-        
-        user_tone_matches = user_keywords & all_tone_keywords
-        movie_tone_matches = movie_keywords & all_tone_keywords
-        
         shared_psychological = (user_keywords & psychological_keywords) & (movie_keywords & psychological_keywords)
-        shared_scifi = (user_keywords & scifi_keywords) & (movie_keywords & scifi_keywords)
-        shared_thriller = (user_keywords & thriller_keywords) & (movie_keywords & thriller_keywords)
-        shared_dark = (user_keywords & dark_keywords) & (movie_keywords & dark_keywords)
         shared_cerebral = (user_keywords & cerebral_keywords) & (movie_keywords & cerebral_keywords)
+        shared_noir = (user_keywords & noir_keywords) & (movie_keywords & noir_keywords)
+        shared_scifi = (user_keywords & scifi_adult_keywords) & (movie_keywords & scifi_adult_keywords)
+        shared_thriller = (user_keywords & thriller_keywords) & (movie_keywords & thriller_keywords)
         
         genre_overlap = movie_genres & user_genres
         keyword_overlap = movie_keywords & user_keywords
         cast_overlap = movie_cast & user_cast
         
-        director_match = (movie_director in user_directors and 
-                         movie_director and 
-                         movie_director != "nan" and 
-                         len(movie_director) > 2)
+        director_titles = user_directors.get(movie_director, [])
+        director_match = len(director_titles) > 0 and movie_director and movie_director != "nan"
         
-        if director_match:
-            director_titles = user_movies[user_movies["director"].str.lower().str.strip() == movie_director]["title"].tolist()
-            if director_titles:
-                example = director_titles[0] if len(director_titles) == 1 else f"{director_titles[0]} and others"
-                reasons.append(f"same director as '{example}' ({movie_director.title()})")
-        
-        tone_descriptions = []
-        if shared_psychological:
-            tone_descriptions.append("psychological depth")
-        if shared_scifi:
-            tone_descriptions.append("sci-fi concepts")
-        if shared_thriller:
-            tone_descriptions.append("thriller suspense")
-        if shared_dark:
-            tone_descriptions.append("dark atmosphere")
-        if shared_cerebral:
-            tone_descriptions.append("cerebral storytelling")
-        
-        if tone_descriptions:
-            if len(tone_descriptions) == 1:
-                reasons.append(f"matches your preference for {tone_descriptions[0]}")
-            elif len(tone_descriptions) == 2:
-                reasons.append(f"combines {tone_descriptions[0]} with {tone_descriptions[1]}")
+        if director_match and director_titles:
+            if len(director_titles) == 1:
+                reasons.append(f"by {movie_director.title()}, who directed '{director_titles[0]}' in your watchlist")
             else:
-                reasons.append(f"blends {', '.join(tone_descriptions[:2])}, and {tone_descriptions[2]}")
+                examples = director_titles[:2]
+                reasons.append(f"by {movie_director.title()}, who directed {len(director_titles)} films in your watchlist including '{examples[0]}'")
         
-        if keyword_overlap and not tone_descriptions:
-            thematic_keywords = keyword_overlap - all_tone_keywords
-            if thematic_keywords and len(thematic_keywords) > 0:
-                kw_sample = sorted(list(thematic_keywords))[:2]
-                if len(kw_sample) > 0:
-                    reasons.append(f"explores similar themes ({', '.join(kw_sample)})")
+        tone_matches = []
+        if shared_psychological:
+            sample = sorted(list(shared_psychological))[:2]
+            tone_matches.append(f"psychological themes ({', '.join(sample)})")
         
-        if genre_overlap and not tone_descriptions:
-            genre_list = sorted(list(genre_overlap))
+        if shared_cerebral:
+            sample = sorted(list(shared_cerebral))[:2]
+            tone_matches.append(f"cerebral exploration ({', '.join(sample)})")
+        
+        if shared_noir:
+            sample = sorted(list(shared_noir))[:2]
+            tone_matches.append(f"dark/noir atmosphere ({', '.join(sample)})")
+        
+        if shared_scifi:
+            sample = sorted(list(shared_scifi))[:2]
+            tone_matches.append(f"adult sci-fi concepts ({', '.join(sample)})")
+        
+        if shared_thriller:
+            sample = sorted(list(shared_thriller))[:2]
+            tone_matches.append(f"thriller elements ({', '.join(sample)})")
+        
+        if tone_matches:
+            if len(tone_matches) == 1:
+                reasons.append(f"shares {tone_matches[0]}")
+            elif len(tone_matches) == 2:
+                reasons.append(f"combines {tone_matches[0]} with {tone_matches[1]}")
+            else:
+                reasons.append(f"merges {', '.join(tone_matches[:2])}, and {tone_matches[2]}")
+        
+        if genre_overlap and len(genre_overlap) > 0:
+            genre_list = sorted(list(genre_overlap))[:2]
             if len(genre_list) == 1:
-                reasons.append(f"shares your taste in {genre_list[0]}")
-            elif len(genre_list) >= 2:
-                reasons.append(f"combines {genre_list[0]} and {genre_list[1]} elements")
+                reasons.append(f"genre match: {genre_list[0]}")
+            else:
+                reasons.append(f"genre overlap: {' and '.join(genre_list)}")
+        
+        if keyword_overlap and not tone_matches:
+            all_tone_kw = psychological_keywords | cerebral_keywords | noir_keywords | scifi_adult_keywords | thriller_keywords
+            thematic_only = keyword_overlap - all_tone_kw
+            if thematic_only and len(thematic_only) > 0:
+                sample = sorted(list(thematic_only))[:2]
+                reasons.append(f"thematic overlap: {', '.join(sample)}")
         
         if cast_overlap and len(cast_overlap) >= 2:
             cast_sample = sorted(list(cast_overlap))[:2]
-            reasons.append(f"features actors from your watchlist ({', '.join(cast_sample)})")
+            reasons.append(f"features {' and '.join(cast_sample)}")
         
         content_score = float(movie_row.get("content_score", 0))
-        if content_score >= 0.6 and len(reasons) == 0:
-            reasons.append("strong thematic and narrative alignment with your taste")
-        elif content_score >= 0.4 and len(reasons) == 0:
-            reasons.append("similar storytelling style to your favorites")
-        elif content_score >= 0.3 and len(reasons) == 0:
-            reasons.append("aligns with your viewing preferences")
+        
+        if content_score >= 0.65 and len(reasons) == 0:
+            reasons.append("strong narrative and thematic alignment with your taste")
+        elif content_score >= 0.50 and len(reasons) == 0:
+            reasons.append("similar storytelling approach to your favorites")
+        elif content_score >= 0.35 and len(reasons) == 0:
+            reasons.append("aligns with your viewing profile")
         
         if not reasons:
-            reasons.append("recommended based on your profile")
+            reasons.append("selected based on compatibility with your preferences")
         
         return " | ".join(reasons)
 
