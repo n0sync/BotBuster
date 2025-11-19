@@ -246,6 +246,9 @@ class MovieRecommender:
             war_drama_markers = ["war", "wwii", "world war", "vietnam", "soldier", "military", 
                                 "veteran", "battle", "combat", "based on true story", 
                                 "true story", "real story", "biography"]
+            vigilante_pulp_markers = ["vigilante", "revenge", "vengeance", "retribution", 
+                                     "assassin", "hitman", "bounty hunter", "gun action",
+                                     "shootout", "stylized violence", "cool guys"]
             
             penalty = 0.0
             
@@ -275,6 +278,14 @@ class MovieRecommender:
             elif war_count == 1:
                 penalty -= 15.0
             
+            vigilante_count = 0
+            for marker in vigilante_pulp_markers:
+                if marker in combined:
+                    vigilante_count += 1
+            
+            if vigilante_count >= 2:
+                penalty -= 30.0
+            
             return penalty
         
         tone_filter_scores = self.catalog.apply(strict_tone_filter, axis=1)
@@ -299,6 +310,10 @@ class MovieRecommender:
                            "consciousness", "simulation", "reality", "time paradox", "multiverse",
                            "posthuman", "transhumanism", "singularity"}
         
+        scifi_philosophical = {"philosophical", "existential", "metaphysical", "reality", 
+                              "consciousness", "simulation", "virtual reality", "identity",
+                              "perception", "truth", "illusion", "matrix"}
+        
         scifi_space_adult = {"space exploration", "alien contact", "first contact", "cosmic horror",
                             "deep space", "interstellar"}
         
@@ -309,6 +324,7 @@ class MovieRecommender:
         user_has_cerebral = bool(user_keywords & cerebral_adult)
         user_has_noir = bool(user_keywords & noir_dark_adult)
         user_has_hard_scifi = bool(user_keywords & scifi_adult_hard)
+        user_has_philosophical_scifi = bool(user_keywords & scifi_philosophical)
         user_has_space_scifi = bool(user_keywords & scifi_space_adult)
         user_has_thriller = bool(user_keywords & thriller_adult)
         
@@ -331,6 +347,9 @@ class MovieRecommender:
             
             if user_has_hard_scifi and (movie_kw & scifi_adult_hard):
                 boost += 0.25
+            
+            if user_has_philosophical_scifi and (movie_kw & scifi_philosophical):
+                boost += 0.30
             
             if user_has_space_scifi and (movie_kw & scifi_space_adult):
                 boost += 0.15
