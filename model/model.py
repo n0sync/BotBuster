@@ -449,7 +449,6 @@ class MovieRecommender:
         ranked = ranked[ranked.apply(final_tone_validation, axis=1)].copy()
         
         ranked = ranked.sort_values("hybrid_score", ascending=False)
-        ranked = ranked.drop_duplicates(subset=["title"]).reset_index(drop=True)
         
         exclude_ids = set()
         if history_exclude and len(self.recent_history) > 0:
@@ -467,6 +466,9 @@ class MovieRecommender:
             if exclude_ids:
                 ranked = ranked[~ranked[self.id_col].isin(exclude_ids)].copy()
             result = self._mmr(ranked, top_n, lambda_div=0.8)
+        
+        result = result.drop_duplicates(subset=[self.title_col, self.id_col], keep="first").reset_index(drop=True)
+        
         cols = [self.id_col, self.title_col, "genres", "keywords", "director",
                 "cast", "overview", "vote_average", "popularity",
                 "content_score", "num_score", "hybrid_score"]
