@@ -85,7 +85,15 @@ class MovieRecommender:
         self.catalog.reset_index(drop=True, inplace=True)
     def fit(self, max_features: int = 30000):
         self.load()
-        weights = {"genres":0.35,"keywords":0.3,"overview":0.25,"cast":0.1,"director":0.0}
+        
+        weights = {
+            "overview": 0.35,
+            "keywords": 0.30,
+            "director": 0.20,
+            "genres": 0.10,
+            "cast": 0.05
+        }
+        
         catalog_matrices = []
         user_matrices = []
         for col, w in weights.items():
@@ -106,28 +114,14 @@ class MovieRecommender:
         self.catalog_matrix = hstack(catalog_matrices).tocsr()
         self.user_matrix = hstack(user_matrices).tocsr()
 
-        if self.user_matrix.shape[0] > 0:
-            qa = self.user[["vote_average","popularity","vote_count"]].copy()
-            qa_scaled = MinMaxScaler().fit_transform(qa.values)
-            w = np.asarray(qa_scaled.mean(axis=1)).reshape(-1,1)
-            wm = csr_matrix(w.T)
-            try:
-                self.user_profile = wm.dot(self.user_matrix).toarray().flatten()
-                n = np.linalg.norm(self.user_profile)
-                if n > 0:
-                    self.user_profile = self.user_profile / n
-            except Exception:
-                self.user_profile = np.zeros(self.catalog_matrix.shape[1])
-        else:
-            self.user_profile = np.zeros(self.catalog_matrix.shape[1])
+        self.user_profile = self.user_matrix.mean(axis=0).A1
+        n = np.linalg.norm(self.user_profile)
+        if n > 0:
+            self.user_profile = self.user_profile / n
 
-        if not self.catalog.empty:
-            num_scaled = self.scaler.fit_transform(
-                self.catalog[["vote_average","popularity","vote_count"]].values
-            )
-            self.catalog["num_score"] = num_scaled.mean(axis=1)
-        else:
-            self.catalog["num_score"] = 0.0
+        num_data = self.catalog[["vote_average", "vote_count"]].values
+        num_scaled = self.scaler.fit_transform(num_data)
+        self.catalog["num_score"] = 0.7 * num_scaled[:, 0] + 0.3 * num_scaled[:, 1]
 
 
     def _mmr(self, candidates, top_n, lambda_div=0.5):
@@ -210,47 +204,66 @@ class MovieRecommender:
         return candidates.loc[sel_positions]
 
 
-    def recommend(self, top_n: int = 20, exclude_liked: bool = True, diversity: float = 0.5,
-                  stochastic: bool = True, temperature: float = 0.7, seed: Optional[int] = None,
+    def recommend(self, top_n: int = 20, exclude_liked: bool = True, 
+                  diversity: float = 0.2, stochastic: bool = False, 
+                  temperature: float = 0.15, seed: Optional[int] = None,
                   history_exclude: bool = True) -> pd.DataFrame:
+    
         self.random_seed = seed
-
+    
         sims = cosine_similarity(self.user_profile.reshape(1, -1), self.catalog_matrix).flatten()
         self.catalog["content_score"] = sims
-        pop = self.catalog["popularity"].replace(0, np.nan).fillna(self.catalog["popularity"].median())
-        novelty = 1.0 - (pop / (pop.max() + 1e-8))
-        self.catalog["novelty_score"] = novelty
+        
         self.catalog["hybrid_score"] = (
-            0.6 * self.catalog["content_score"] +
-            0.2 * self.catalog["num_score"] +
-            0.2 * self.catalog["novelty_score"]
+            0.85 * self.catalog["content_score"] +
+            0.15 * self.catalog["num_score"]
         )
+        
+        user_directors = set(self.user["director"].dropna().str.lower())
+        director_boost = self.catalog["director"].str.lower().isin(user_directors).astype(float) * 0.15
+        self.catalog["hybrid_score"] += director_boost
+        
+        user_genre_tokens = " ".join(self.user["genres"]).lower().split()
+        user_genre_freq = pd.Series(user_genre_tokens).value_counts(normalize=True)
+        
+        def genre_match_score(row):
+            catalog_genres = set(str(row["genres"]).lower().split())
+            return sum(user_genre_freq.get(g, 0) for g in catalog_genres)
+        
+        self.catalog["genre_alignment"] = self.catalog.apply(genre_match_score, axis=1)
+        self.catalog["hybrid_score"] += 0.10 * self.catalog["genre_alignment"]
+        
         if exclude_liked:
             liked_ids = set(self.user[self.id_col].tolist())
             liked_titles = set(self.user[self.title_col].astype(str).tolist())
-            mask = (~self.catalog[self.id_col].isin(liked_ids)) & (~self.catalog[self.title_col].astype(str).isin(liked_titles))
+            mask = (~self.catalog[self.id_col].isin(liked_ids)) & \
+                   (~self.catalog[self.title_col].astype(str).isin(liked_titles))
             ranked = self.catalog[mask].copy()
         else:
             ranked = self.catalog.copy()
+        
         ranked = ranked.sort_values("hybrid_score", ascending=False)
         ranked = ranked.drop_duplicates(subset=["title"]).reset_index(drop=True)
+        
         exclude_ids = set()
         if history_exclude and len(self.recent_history) > 0:
             exclude_ids.update(set(self.recent_history))
-
+        
         if stochastic:
-            candidate_pool = ranked.head(max(200, top_n * 10)).copy()
-            result = self._stochastic_diverse_selection(candidate_pool, top_n,
-                                                       diversity=diversity,
-                                                       temperature=temperature,
-                                                       exclude_ids=exclude_ids)
+            candidate_pool = ranked.head(max(100, top_n * 5)).copy()
+            result = self._stochastic_diverse_selection(
+                candidate_pool, top_n,
+                diversity=diversity,
+                temperature=max(temperature, 0.1),
+                exclude_ids=exclude_ids
+            )
         else:
             if exclude_ids:
                 ranked = ranked[~ranked[self.id_col].isin(exclude_ids)].copy()
-            result = self._mmr(ranked, top_n, lambda_div=diversity)
+            result = self._mmr(ranked, top_n, lambda_div=0.8)
         cols = [self.id_col, self.title_col, "genres", "keywords", "director",
                 "cast", "overview", "vote_average", "popularity",
-                "content_score", "num_score", "novelty_score", "hybrid_score"]
+                "content_score", "num_score", "hybrid_score"]
         try:
             for mid in result[self.id_col].tolist():
                 self.recent_history.append(mid)
@@ -277,8 +290,6 @@ class MovieRecommender:
             reasons.append(f"features actors you liked: {', '.join(sorted(list(movie_cast & user_cast)[:3]))}")
         if movie_director in user_directors and movie_director:
             reasons.append(f"directed by {movie_director}, also in your favorites")
-        if "novelty_score" in movie_row and movie_row["novelty_score"] > 0.6:
-            reasons.append("novel but highly relevant")
         if not reasons:
             reasons.append("shares narrative style with your watchlist")
         return " | ".join(reasons)
