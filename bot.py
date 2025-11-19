@@ -156,9 +156,19 @@ async def clear_watchlist(interaction: discord.Interaction):
 @bot.tree.command(name="clear_messages", description="Clear all messages in this channel")
 async def clear_messages(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
+    
+    if not interaction.guild:
+        await interaction.followup.send("This command can only be used in a server.", ephemeral=True)
+        return
+    
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.followup.send("Unable to verify permissions.", ephemeral=True)
+        return
+    
     if not interaction.user.guild_permissions.manage_messages:
         await interaction.followup.send("You don't have permission to manage messages.", ephemeral=True)
         return
+    
     deleted = await interaction.channel.purge(limit=None)
     await interaction.followup.send(f"Deleted {len(deleted)} messages.", ephemeral=True)
     
