@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from data.data import TMDBMovieFetcher
 from model.model import MovieRecommender
 
-async def run_recommender(new_titles: list[str], top_n: int = 3):
+async def run_model(new_titles: list[str], top_n: int = 3):
     load_dotenv()
     api_key = os.getenv("TMDB_API_KEY")
     if not api_key:

@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from discord import app_commands
-from script import run_recommender
+from main import run_model
 from flask import Flask
 from threading import Thread
 import logging
@@ -56,7 +56,7 @@ async def recommend(interaction: discord.Interaction):
         await interaction.followup.send("Your watchlist is empty. Add some movies first!")
         return
 
-    results = await run_recommender(titles, top_n=1)
+    results = await run_model(titles, top_n=1)
     await interaction.followup.send(results[0])
     
 
@@ -74,7 +74,7 @@ async def recommend_n(interaction: discord.Interaction, number: int):
         await interaction.followup.send("Your watchlist is empty. Add some movies first!")
         return
 
-    results = await run_recommender(titles, top_n=number)
+    results = await run_model(titles, top_n=number)
     combined = "\n\n".join(results)
 
     if len(combined) <= 2000:
@@ -155,11 +155,12 @@ async def clear_watchlist(interaction: discord.Interaction):
 
 @bot.tree.command(name="clear_messages", description="Clear all messages in this channel")
 async def clear_messages(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.manage_messages:
-        await interaction.response.send_message("You don't have permission to manage messages.", ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True)
-    await interaction.channel.purge(limit=None)
-
+    if not interaction.user.guild_permissions.manage_messages:
+        await interaction.followup.send("You don't have permission to manage messages.", ephemeral=True)
+        return
+    deleted = await interaction.channel.purge(limit=None)
+    await interaction.followup.send(f"Deleted {len(deleted)} messages.", ephemeral=True)
+    
 if __name__ == "__main__":
     bot.run(TOKEN)
