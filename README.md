@@ -75,6 +75,8 @@ python bot.py
 
 Once running, the bot listens for slash commands in your server.
 
+**Note:** The bot includes a Flask web server for compatibility with free hosting platforms that require a web endpoint.
+
 ## Commands
 
 | Command | Description |
